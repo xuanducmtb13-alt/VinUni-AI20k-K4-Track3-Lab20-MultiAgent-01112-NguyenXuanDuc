@@ -1,5 +1,10 @@
 """Command-line entrypoint for the lab starter."""
 
+# Load .env into OS environment BEFORE importing LangChain/LangGraph
+# so that LANGCHAIN_TRACING_V2 is visible to the tracing SDK.
+from dotenv import load_dotenv
+load_dotenv(override=True)
+
 from typing import Annotated
 
 import typer
@@ -41,16 +46,45 @@ def _parse_query(query: str) -> ResearchQuery:
 def baseline(
     query: Annotated[str, typer.Option("--query", "-q", help="Research query")],
 ) -> None:
-    """Run a minimal single-agent baseline placeholder."""
-
+    """Run a minimal single-agent baseline."""
     _init()
     request = _parse_query(query)
-    state = ResearchState(request=request)
-    state.final_answer = (
-        "Baseline skeleton response. TODO(student): replace this with a real single-agent "
-        "implementation and record latency/cost/quality metrics."
-    )
-    console.print(Panel.fit(state.final_answer, title="Single-Agent Baseline"))
+    
+    def baseline_runner(q: str) -> ResearchState:
+        from multi_agent_research_lab.services.llm_client import LLMClient
+        from multi_agent_research_lab.services.search_client import SearchClient
+        from multi_agent_research_lab.core.schemas import AgentResult
+        
+        st = ResearchState(request=request)
+        llm = LLMClient()
+        searcher = SearchClient()
+        
+        # 1. Search
+        st.sources = searcher.search(q, max_results=5)
+        
+        # 2. Write
+        context = "\n".join([f"- {s.title}: {s.snippet} ({s.url})" for s in st.sources])
+        sys_prompt = "You are a single helpful assistant. Use the provided context to answer the user's research query comprehensively."
+        user_prompt = f"Context:\n{context}\n\nQuery: {q}"
+        
+        res = llm.complete(sys_prompt, user_prompt)
+        st.final_answer = res.content
+        st.agent_results.append(AgentResult(
+            agent="writer",
+            content=res.content,
+            metadata={"cost_usd": res.cost_usd}
+        ))
+        st.iteration = 1
+        return st
+
+    from multi_agent_research_lab.evaluation.benchmark import run_benchmark
+    from multi_agent_research_lab.evaluation.report import render_markdown_report
+    
+    console.print("[yellow]Running Single-Agent Baseline...[/yellow]")
+    state, metrics = run_benchmark("Single-Agent Baseline", query, baseline_runner)
+    
+    console.print(Panel.fit(state.final_answer, title="Single-Agent Baseline Answer"))
+    console.print(render_markdown_report([metrics]))
 
 
 @app.command("multi-agent")
